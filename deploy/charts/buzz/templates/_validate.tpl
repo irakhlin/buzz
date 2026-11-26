@@ -111,11 +111,27 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "Postgres source missing: enable postgresql.enabled=true, set externalPostgresql.url, or provide secrets.existingSecret with key DATABASE_URL." -}}
 {{- end -}}
 
-{{/* S3 / object-storage source must exist somewhere. With the default
+{{/* Object-storage source must exist somewhere. With the default
      BUZZ_GIT_CONFORMANCE_PROBE behavior, an unreachable bucket is detected
      before the relay opens its listener; operators can explicitly disable that
      startup gate. */}}
-{{- if not (or .Values.minio.enabled .Values.s3.endpoint .Values.secrets.existingSecret) -}}
+{{- if eq (include "buzz.storageBackend" .) "azure" -}}
+  {{- if .Values.minio.enabled -}}
+    {{- fail "storage.backend=azure cannot be combined with minio.enabled=true; the bundled MinIO quickstart is S3-only." -}}
+  {{- end -}}
+  {{- if not .Values.storage.azure.account -}}
+    {{- fail "storage.azure.account is required when storage.backend=azure." -}}
+  {{- end -}}
+  {{- if not .Values.storage.azure.container -}}
+    {{- fail "storage.azure.container is required when storage.backend=azure." -}}
+  {{- end -}}
+  {{- if and (eq .Values.storage.azure.auth "shared_key") (not (or .Values.storage.azure.accountKey .Values.secrets.existingSecret)) -}}
+    {{- fail "storage.azure.auth=shared_key needs storage.azure.accountKey, or secrets.existingSecret with key BUZZ_AZURE_STORAGE_ACCOUNT_KEY." -}}
+  {{- end -}}
+  {{- if and .Values.storage.azure.accountKey (has .Values.storage.azure.auth (list "workload_identity" "managed_identity")) -}}
+    {{- fail "storage.azure.accountKey is set but storage.azure.auth selects Microsoft Entra ID; unset the key or use shared_key." -}}
+  {{- end -}}
+{{- else if not (or .Values.minio.enabled .Values.s3.endpoint .Values.secrets.existingSecret) -}}
   {{- fail "S3/object-storage source missing: enable minio.enabled=true (quickstart in-cluster), set s3.endpoint + s3.bucket + credentials, or provide secrets.existingSecret with keys BUZZ_S3_ACCESS_KEY + BUZZ_S3_SECRET_KEY. By default the relay runs a startup S3 conformance probe and exits if storage is unreachable; disabling BUZZ_GIT_CONFORMANCE_PROBE also removes that startup storage check." -}}
 {{- end -}}
 

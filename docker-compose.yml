@@ -149,6 +149,54 @@ services:
       com.buzz.env: "dev"
     restart: "no"
 
+  # Opt-in Azure Blob Storage emulator for BUZZ_STORAGE_BACKEND=azure; see
+  # docs/azure-blob-storage.md. Uses Microsoft's published Azurite dev account.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.38.0@sha256:c26024d62bf4a5b88a40968afd217234c00e1fc9a4790dc6105d1ca7979f6eec
+    container_name: buzz-azurite
+    profiles: ["azurite"]
+    command: >
+      azurite-blob --blobHost 0.0.0.0 --location /data --loose
+      --skipApiVersionCheck --disableTelemetry
+      --accountConfigAsJson '{"isBlobVersioningEnabled":true}'
+    ports:
+      - "127.0.0.1:10000:10000"
+    volumes:
+      - azurite-data:/data
+    networks:
+      - buzz-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "10000"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    labels:
+      com.buzz.service: "azurite"
+      com.buzz.env: "dev"
+    restart: unless-stopped
+
+  azurite-init:
+    image: mcr.microsoft.com/azure-cli:2.79.0@sha256:4faeb3c955086c3842d4f8cf0ff1d900ce3a1c68c6e6c6430c5e8a3cb882c5aa
+    container_name: buzz-azurite-init
+    profiles: ["azurite"]
+    depends_on:
+      azurite:
+        condition: service_healthy
+    networks:
+      - buzz-net
+    environment:
+      AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+    command: ["az", "storage", "container", "create", "--name", "buzz-media", "--only-show-errors"]
+    labels:
+      com.buzz.service: "azurite-init"
+      com.buzz.env: "dev"
+    restart: "no"
+
   # Opt-in message index; see docs/opensearch-search-deployment.md.
   opensearch:
     image: opensearchproject/opensearch:2.19.3@sha256:e96cc6ae1500a073d973c0906f30f7cf4d9c461f32f855f9242a2da933660cdd
@@ -210,6 +258,10 @@ volumes:
     name: buzz-minio-data
     labels:
       com.buzz.volume: "minio"
+  azurite-data:
+    name: buzz-azurite-data
+    labels:
+      com.buzz.volume: "azurite"
   prometheus-data:
     name: buzz-prometheus-data
     labels:

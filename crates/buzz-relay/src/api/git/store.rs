@@ -21,11 +21,22 @@
 //! object bytes against the expected digest on `get_verified`; any mismatch is
 //! *detectable*, not silent — that is what A1's "create-only + content-address"
 //! discipline buys us, independent of bucket immutability features.
+//!
+//! ## Azure Blob Storage
+//!
+//! The same contract runs on Azure Blob Storage when the relay's media config
+//! selects it. Block-blob `If-None-Match: *` and `If-Match` are atomic on the
+//! service, so A1 and A3 hold; a create-only collision answers 409
+//! `BlobAlreadyExists` (or 412) and maps to the same idempotent/lost-race
+//! outcomes as S3's 412. The conformance probe gates both backends.
 
 #![allow(dead_code)] // wired in by the push path in a follow-up commit
 
 use std::sync::Arc;
 
+use buzz_media::azure::{
+    AzureBlobClient, AzureBlobConfig, AzureError, DeleteOptions, GetOptions, PutCondition,
+};
 use bytes::Bytes;
 use s3::creds::Credentials;
 use s3::error::S3Error;
@@ -91,6 +102,9 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Any other Azure Blob Storage backend / transport error.
+    #[error("azure blob backend error: {0}")]
+    Azure(#[from] AzureError),
     /// Invalid storage configuration detected at client construction.
     #[error("git store config error: {0}")]
     Config(String),
@@ -106,15 +120,17 @@ pub enum StoreError {
 /// race phases drop these from the observer set; a backend that fails every
 /// racer this way still fails closed on the two-observer floor.
 fn racer_outcome_unknown(err: &StoreError) -> bool {
-    matches!(
-        err,
-        StoreError::Backend(
+    match err {
+        StoreError::Backend(e) => matches!(
+            e,
             S3Error::Reqwest(_)
                 | S3Error::Http(_)
                 | S3Error::Io(_)
                 | S3Error::HttpFailWithBody(500..=599, _)
-        )
-    )
+        ),
+        StoreError::Azure(e) => e.outcome_unknown(),
+        _ => false,
+    }
 }
 
 /// Configuration for `GitStore::run_conformance_probe`.
@@ -186,10 +202,72 @@ impl From<ProbeFailure> for StoreError {
 /// Object-store client for git refs.
 #[derive(Clone)]
 pub struct GitStore {
-    bucket: Arc<Bucket>,
+    backend: Backend,
+}
+
+#[derive(Clone)]
+enum Backend {
+    S3(Arc<Bucket>),
+    Azure(Arc<AzureBlobClient>),
+}
+
+/// Create-only Azure write: `Ok(true)` when this call created the blob,
+/// `Ok(false)` when the name already holds one (409 `BlobAlreadyExists` or
+/// 412). Conditional writes are never retried by the client, so a lost
+/// response cannot be misread as a collision with our own write.
+async fn azure_put_create_only(
+    client: &AzureBlobClient,
+    key: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<bool, StoreError> {
+    match client
+        .put_blob(
+            key,
+            Bytes::copy_from_slice(bytes),
+            content_type,
+            PutCondition::IfNoneMatchAny,
+        )
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) if e.is_precondition_failed() => Ok(false),
+        Err(e) => Err(StoreError::Azure(e)),
+    }
 }
 
 impl GitStore {
+    /// Build a client for the object store the relay's media config selects:
+    /// Azure Blob Storage when `media.azure` is set, otherwise S3. Git objects
+    /// share the media bucket/container.
+    pub fn from_media_config(media: &buzz_media::MediaConfig) -> Result<Self, StoreError> {
+        match &media.azure {
+            Some(azure) => Self::new_azure(azure),
+            None => Self::new(
+                &media.s3_endpoint,
+                &media.s3_access_key,
+                &media.s3_secret_key,
+                &media.s3_bucket,
+                &media.s3_region,
+                media.s3_addressing_style,
+            ),
+        }
+    }
+
+    /// Build a client against an Azure Blob Storage container.
+    pub fn new_azure(config: &AzureBlobConfig) -> Result<Self, StoreError> {
+        Ok(Self {
+            backend: Backend::Azure(Arc::new(AzureBlobClient::new(config)?)),
+        })
+    }
+
+    fn s3(&self) -> Result<&Bucket, &AzureBlobClient> {
+        match &self.backend {
+            Backend::S3(bucket) => Ok(bucket),
+            Backend::Azure(client) => Err(client),
+        }
+    }
+
     /// Build a client against an S3-compatible endpoint (e.g. MinIO).
     ///
     /// `addressing_style` is shared with media storage so both paths sign and
@@ -236,7 +314,7 @@ impl GitStore {
             buzz_media::config::S3AddressingStyle::Virtual => bucket,
         };
         Ok(Self {
-            bucket: Arc::from(bucket),
+            backend: Backend::S3(Arc::from(bucket)),
         })
     }
 
@@ -281,10 +359,18 @@ impl GitStore {
         content_type: &str,
     ) -> Result<String, StoreError> {
         let key = Self::content_key(prefix, bytes);
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            // A collision is idempotent success for the same reason as S3's 412.
+            Err(azure) => {
+                return azure_put_create_only(azure, &key, bytes, content_type)
+                    .await
+                    .map(|_| key)
+            }
+        };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
+        match bucket
             .put_object_with_content_type_and_headers(&key, bytes, content_type, Some(headers))
             .await
         {
@@ -316,10 +402,17 @@ impl GitStore {
     /// trusting it.
     pub async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
         let key = Self::idx_key_for_pack_digest(pack_digest)?;
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => {
+                return azure_put_create_only(azure, &key, idx_bytes, "application/x-git-index")
+                    .await
+                    .map(|_| key)
+            }
+        };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
+        match bucket
             .put_object_with_content_type_and_headers(
                 &key,
                 idx_bytes,
@@ -368,7 +461,17 @@ impl GitStore {
     /// detectability. This raw `get` exists for the pointer (whose key is not a
     /// digest).
     pub async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
-        match self.bucket.get_object(key).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => {
+                return match azure.get_blob(key, GetOptions::default()).await {
+                    Ok(content) => Ok(content.bytes),
+                    Err(e) if e.is_not_found() => Err(StoreError::NotFound(key.into())),
+                    Err(e) => Err(StoreError::Azure(e)),
+                }
+            }
+        };
+        match bucket.get_object(key).await {
             Ok(resp) => Ok(Bytes::from(resp.to_vec())),
             Err(S3Error::HttpFailWithBody(404, _)) => Err(StoreError::NotFound(key.into())),
             Err(e) => Err(StoreError::Backend(e)),
@@ -427,7 +530,28 @@ impl GitStore {
 
     /// GET an object after rejecting bodies larger than `max_bytes`.
     pub async fn get_limited(&self, key: &str, max_bytes: u64) -> Result<Bytes, StoreError> {
-        let (head, status) = self.bucket.head_object(key).await.map_err(|e| match e {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            // One GET: the client rejects an oversized declared length before
+            // buffering and caps the streamed body at `max_bytes`.
+            Err(azure) => {
+                let options = GetOptions {
+                    max_bytes: Some(max_bytes),
+                    ..GetOptions::default()
+                };
+                return match azure.get_blob(key, options).await {
+                    Ok(content) => Ok(content.bytes),
+                    Err(AzureError::TooLarge { size, max }) => Err(StoreError::ObjectTooLarge {
+                        key: key.into(),
+                        size,
+                        max,
+                    }),
+                    Err(e) if e.is_not_found() => Err(StoreError::NotFound(key.into())),
+                    Err(e) => Err(StoreError::Azure(e)),
+                };
+            }
+        };
+        let (head, status) = bucket.head_object(key).await.map_err(|e| match e {
             S3Error::HttpFailWithBody(404, _) => StoreError::NotFound(key.into()),
             other => StoreError::Backend(other),
         })?;
@@ -476,7 +600,24 @@ impl GitStore {
     /// the snapshot consistent (A2: a single GET observes a single committed
     /// object). Verified empirically in `probe::probe_get_exposes_etag`.
     pub async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
-        match self.bucket.get_object(key).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => {
+                return match azure.get_blob(key, GetOptions::default()).await {
+                    Ok(content) => {
+                        let etag = content.etag.ok_or_else(|| {
+                            StoreError::Azure(AzureError::Parse(
+                                "GET pointer: response missing ETag".into(),
+                            ))
+                        })?;
+                        Ok(Some((ETag(etag), content.bytes)))
+                    }
+                    Err(e) if e.is_not_found() => Ok(None),
+                    Err(e) => Err(StoreError::Azure(e)),
+                }
+            }
+        };
+        match bucket.get_object(key).await {
             Ok(resp) => {
                 let headers = resp.headers();
                 let etag = headers
@@ -507,6 +648,10 @@ impl GitStore {
         body: &[u8],
         precond: Precond,
     ) -> Result<CasOutcome, StoreError> {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return Self::put_pointer_azure(azure, key, body, &precond).await,
+        };
         let mut headers = axum::http::HeaderMap::new();
         match &precond {
             Precond::IfNoneMatchStar => {
@@ -524,11 +669,61 @@ impl GitStore {
                 );
             }
         }
-        let result = self
-            .bucket
+        let result = bucket
             .put_object_with_content_type_and_headers(key, body, "application/json", Some(headers))
             .await;
         Self::classify_cas(result)
+    }
+
+    /// Azure arm of [`Self::put_pointer`]. A failed precondition (412, or 409
+    /// `BlobAlreadyExists` for create-only) is `LostRace`; anything else,
+    /// including 404 for `If-Match` on a deleted pointer, bubbles as on S3.
+    async fn put_pointer_azure(
+        client: &AzureBlobClient,
+        key: &str,
+        body: &[u8],
+        precond: &Precond,
+    ) -> Result<CasOutcome, StoreError> {
+        let condition = match precond {
+            Precond::IfNoneMatchStar => PutCondition::IfNoneMatchAny,
+            Precond::IfMatch(ETag(tag)) => PutCondition::IfMatch(tag),
+        };
+        match client
+            .put_blob(
+                key,
+                Bytes::copy_from_slice(body),
+                "application/json",
+                condition,
+            )
+            .await
+        {
+            Ok(outcome) => outcome
+                .etag
+                .map(|tag| CasOutcome::Won(ETag(tag)))
+                .ok_or_else(|| {
+                    // Fail closed, as `classify_cas` does for S3.
+                    StoreError::Azure(AzureError::Parse(
+                        "CAS succeeded but response missing ETag header \
+                     (backend does not satisfy ETag-token consistency)"
+                            .into(),
+                    ))
+                }),
+            Err(e) if e.is_precondition_failed() => Ok(CasOutcome::LostRace),
+            Err(e) => Err(StoreError::Azure(e)),
+        }
+    }
+
+    /// Best-effort delete of a probe scratch key. Errors (including 404) are
+    /// ignored; the probe's own assertions catch any state left behind.
+    async fn delete_scratch(&self, key: &str) {
+        match &self.backend {
+            Backend::S3(bucket) => {
+                let _ = bucket.delete_object(key).await;
+            }
+            Backend::Azure(client) => {
+                let _ = client.delete_blob(key, DeleteOptions::default()).await;
+            }
+        }
     }
 
     /// Map a rust-s3 PUT outcome to a `CasOutcome`.
@@ -641,7 +836,7 @@ impl GitStore {
         // -- Phase 2: if_match_race -----------------------------------------------
         // Seed the pointer with a known value, then race N IfMatch updates.
         let seed = b"probe-pointer-seed".to_vec();
-        let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
+        self.delete_scratch(&pointer_key).await; // ignore 404
         let seed_outcome = self
             .put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar)
             .await?;
@@ -797,7 +992,7 @@ impl GitStore {
             let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
             let key = Self::content_key("probe/inm-race", &body);
             // Clean slate.
-            let _ = self.bucket.delete_object(&key).await;
+            self.delete_scratch(&key).await;
             let arc_self: Arc<&Self> = Arc::new(self);
             let mut tasks = Vec::with_capacity(cfg.race_width);
             for _ in 0..cfg.race_width {
@@ -939,7 +1134,7 @@ impl GitStore {
 
         // Cleanup pointer (immutable probe writes accumulate by design; the
         // bucket's retention policy handles them, not the probe).
-        let _ = self.bucket.delete_object(&pointer_key).await;
+        self.delete_scratch(&pointer_key).await;
 
         Ok(ProbeReport {
             race_width: cfg.race_width,
@@ -959,10 +1154,18 @@ impl GitStore {
     /// we need to *see* 412 outcomes rather than swallow them as idempotent.
     /// Returns the HTTP status code on success-or-412; bubbles other errors.
     async fn put_immutable_raw(&self, key: &str, bytes: &[u8]) -> Result<u16, StoreError> {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            // Report Azure outcomes in S3 terms: created → 201, collision → 412.
+            Err(azure) => {
+                let created =
+                    azure_put_create_only(azure, key, bytes, "application/octet-stream").await?;
+                return Ok(if created { 201 } else { 412 });
+            }
+        };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
+        match bucket
             .put_object_with_content_type_and_headers(
                 key,
                 bytes,
@@ -974,6 +1177,17 @@ impl GitStore {
             Ok(resp) => Ok(resp.status_code()),
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(412),
             Err(e) => Err(StoreError::Backend(e)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl GitStore {
+    /// The S3 bucket of an S3-backed store; panics on Azure.
+    fn bucket(&self) -> &Bucket {
+        match self.s3() {
+            Ok(bucket) => bucket,
+            Err(_) => panic!("expected an S3-backed git store"),
         }
     }
 }
@@ -1041,7 +1255,7 @@ mod tests {
             buzz_media::config::S3AddressingStyle::Path,
         )
         .expect("static creds should build a git store");
-        match store.bucket.region {
+        match store.bucket().region {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             ref other => panic!("expected Custom region, got {other:?}"),
         }
@@ -1070,8 +1284,8 @@ mod tests {
                 style,
             )
             .expect("construct git store");
-            assert_eq!(store.bucket.url(), expected_url);
-            assert_eq!(store.bucket.is_path_style(), path_style);
+            assert_eq!(store.bucket().url(), expected_url);
+            assert_eq!(store.bucket().is_path_style(), path_style);
         }
     }
 
@@ -1458,7 +1672,7 @@ mod probe {
         let mut hdrs = axum::http::HeaderMap::new();
         hdrs.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
         let r1 = st
-            .bucket
+            .bucket()
             .put_object_with_content_type_and_headers(
                 &key,
                 b"first",
@@ -1468,11 +1682,11 @@ mod probe {
             .await;
         assert!((200..300).contains(&r1.expect("first ok").status_code()));
         let r2 = st
-            .bucket
+            .bucket()
             .put_object_with_content_type_and_headers(&key, b"second", "text/plain", Some(hdrs))
             .await;
         assert!(matches!(r2, Err(S3Error::HttpFailWithBody(412, _))));
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = st.bucket().delete_object(&key).await;
     }
 
     #[tokio::test]
@@ -1550,8 +1764,8 @@ mod probe {
         assert_eq!(etag_now, e2, "get_pointer etag matches PUT-response etag");
 
         // Cleanup.
-        let _ = st.bucket.delete_object(&pkey).await;
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = st.bucket().delete_object(&pkey).await;
+        let _ = st.bucket().delete_object(&key).await;
     }
 
     /// End-to-end conformance probe against MinIO. This is the same code path
@@ -1582,16 +1796,16 @@ mod probe {
         }
         let st = store();
         let key = format!("probe/etag-{}.txt", uuid::Uuid::new_v4());
-        st.bucket
+        st.bucket()
             .put_object_with_content_type(&key, b"hi", "text/plain")
             .await
             .expect("put");
-        let resp = st.bucket.get_object(&key).await.expect("get");
+        let resp = st.bucket().get_object(&key).await.expect("get");
         let headers = resp.headers();
         eprintln!("GET headers: {headers:?}");
         let etag = headers.get("etag").or_else(|| headers.get("ETag")).cloned();
         assert!(etag.is_some(), "GET response must carry ETag header");
         eprintln!("ETag from GET: {etag:?}");
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = st.bucket().delete_object(&key).await;
     }
 }

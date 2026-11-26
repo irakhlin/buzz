@@ -134,6 +134,7 @@ pub(super) async fn fixture() -> Fixture {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         })
         .unwrap(),
     );

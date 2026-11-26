@@ -1156,6 +1156,8 @@ impl Config {
                 .ok()
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
+            azure: buzz_media::azure::AzureBlobConfig::from_env()
+                .map_err(ConfigError::InvalidValue)?,
         };
         let media_max_concurrent_uploads: usize =
             std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")

@@ -45,7 +45,9 @@ fn default_s3_region() -> String {
     "us-east-1".to_string()
 }
 
-/// Configuration for media storage (S3/MinIO).
+/// Configuration for media storage (S3/MinIO, or Azure Blob Storage).
+///
+/// The `s3_*` fields are ignored when [`MediaConfig::azure`] is set.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MediaConfig {
     /// S3-compatible endpoint URL (e.g. "http://localhost:9000").
@@ -95,6 +97,11 @@ pub struct MediaConfig {
     /// recorded alongside a valid IP.
     #[serde(default)]
     pub upload_port_header: Option<String>,
+    /// Azure Blob Storage settings. When set, media is stored in this
+    /// container instead of the S3 bucket. Selected with
+    /// `BUZZ_STORAGE_BACKEND=azure`.
+    #[serde(default)]
+    pub azure: Option<crate::azure::AzureBlobConfig>,
 }
 
 impl MediaConfig {
@@ -143,6 +150,9 @@ impl MediaConfig {
                     .to_string(),
             );
         }
+        if let Some(azure) = &self.azure {
+            azure.validate()?;
+        }
         for (name, value) in [
             ("BUZZ_MEDIA_UPLOAD_IP_HEADER", &self.upload_ip_header),
             ("BUZZ_MEDIA_UPLOAD_PORT_HEADER", &self.upload_port_header),
@@ -178,6 +188,7 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         }
     }
 

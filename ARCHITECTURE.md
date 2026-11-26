@@ -139,7 +139,7 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
 
 buzz-acp            (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
 buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
-buzz-media          (Blossom/S3 media storage)
+buzz-media          (Blossom media storage on S3 or Azure Blob Storage)
 buzz-cli            (agent-first CLI)
 buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
@@ -824,14 +824,14 @@ Subcommands:
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
 | `deletions` | Submit, inspect, approve, abort, unblock, run, or drain durable whole-community deletion requests |
-| `storage-snapshot` | Run one isolated S3 accounting scan and publish its complete Postgres snapshot |
+| `storage-snapshot` | Run one isolated object-store (S3 or Azure Blob) accounting scan and publish its complete Postgres snapshot |
 | `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
 
 The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/buzz-admin`) and is the recommended way to manage relay membership in production. Use `./run.sh add-member`, `./run.sh remove-member`, and `./run.sh list-members` in Docker Compose deployments.
 
 Kubernetes deployments may schedule the typed one-shot
 `buzz-admin deletions drain` command directly. The pod owns its bounded
-Postgres/Redis clients and S3 client; it does not call relay HTTP. Durable
+Postgres/Redis clients and object-store client; it does not call relay HTTP. Durable
 requests, leases, retry timing, and checkpoints in Postgres are the handoff and
 execution authority, so Kubernetes uses `Forbid` concurrency and zero Job
 retries rather than introducing a second retry system.
@@ -938,6 +938,7 @@ Docker Compose provides the full local development stack. All services include h
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
 | Silo (MinIO fork) | `pgsty/silo` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
+| Azurite (profile `azurite`) | `mcr.microsoft.com/azure-storage/azurite` | 10000 | Azure Blob Storage emulator for the optional Azure backend ([docs](docs/azure-blob-storage.md)) |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
 
 ### Postgres Schema (key tables)

@@ -133,6 +133,12 @@ impl From<s3::error::S3Error> for MediaError {
     }
 }
 
+impl From<crate::azure::AzureError> for MediaError {
+    fn from(e: crate::azure::AzureError) -> Self {
+        Self::StorageError(e.to_string())
+    }
+}
+
 impl From<serde_json::Error> for MediaError {
     fn from(e: serde_json::Error) -> Self {
         Self::StorageError(e.to_string())

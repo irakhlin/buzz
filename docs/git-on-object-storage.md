@@ -5,7 +5,7 @@
 ## Abstract
 
 This document specifies a protocol for hosting git repositories on an object
-store (S3 and S3-compatible backends such as MinIO) with **no persistent
+store (S3 and S3-compatible backends such as MinIO, or Azure Blob Storage) with **no persistent
 filesystem**, and states what has been verified about it. Repository
 content is stored as create-only, content-addressed pack objects (immutable by
 protocol discipline — see A1, not by assuming an immutable store); the current
@@ -209,7 +209,9 @@ See the [CLI examples](../crates/buzz-cli/README.md#default-branch).
 
 The protocol's safety is proved *relative to* the following properties of the
 object store. Each is a documented property of AWS S3 (2024+) and a testable
-assumption for any S3-compatible backend.
+assumption for any S3-compatible backend. Azure Blob Storage documents the same
+conditional-write semantics for block blobs; see
+[Azure Blob Storage](#azure-blob-storage) under Conformance.
 
 - **(A1) Durable write.** A `PUT` that returns success is durable. S3 does *not*
   by itself make an object immutable — that is enforced by **protocol rule**, not
@@ -551,6 +553,19 @@ checkable.
 
 If the probe passes, A3 is admitted for that backend and Theorems 1–3 transfer
 unchanged.
+
+### Azure Blob Storage
+
+The relay runs the same protocol and the same probe on an Azure Blob Storage
+container ([operator guide](azure-blob-storage.md)). Packs, indexes, and
+manifests are block blobs written with `If-None-Match: *`; the pointer is a
+block blob written with `If-Match: E` or `If-None-Match: *`. The service
+answers a lost create race with 409 `BlobAlreadyExists` or 412 and a stale
+`If-Match` with 412 `ConditionNotMet`; the store classifies both as
+precondition failures, exactly like S3's 412. ETags are read verbatim from
+the `ETag` response header of Put Blob, Get Blob, and Get Blob Properties and
+sent back unchanged in `If-Match`. As with any non-AWS backend, A3 on Azure is
+admitted by the probe, not assumed.
 
 ## Prior Art
 

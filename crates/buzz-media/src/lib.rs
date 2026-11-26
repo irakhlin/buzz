@@ -3,6 +3,7 @@
 //! Library crate — no Axum dependency for handlers. Axum handlers live in `buzz-relay`.
 
 pub mod auth;
+pub mod azure;
 pub mod bucket_index;
 pub mod config;
 pub mod error;

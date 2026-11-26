@@ -43,6 +43,7 @@ fn minio_config(bucket: String) -> MediaConfig {
         upload_records_enabled: false,
         upload_ip_header: None,
         upload_port_header: None,
+        azure: None,
     }
 }
 

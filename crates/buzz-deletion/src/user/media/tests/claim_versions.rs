@@ -110,6 +110,7 @@ async fn historical_claim_protects_shared_file_and_bad_claim_aborts_before_delet
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         })
         .unwrap();
         // Shared is storage-only: discovery and historical sharing both require GETs.

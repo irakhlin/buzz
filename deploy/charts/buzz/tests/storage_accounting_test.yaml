@@ -527,3 +527,60 @@ tests:
             name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
             value: "430be579311332ea582db391704bd58601bcf0f3f5682d22bdabdac24a47169"
         template: templates/storage-accounting-cronjob.yaml
+  - it: points the relay, worker, and Secret at Azure Blob Storage instead of S3
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      storage:
+        backend: azure
+        azure:
+          account: examplemedia
+          container: buzz-media-example
+          endpoint: https://examplemedia.blob.core.example.net
+          auth: shared_key
+          accountKey: ZXhhbXBsZQ==
+      storageAccounting.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: BUZZ_STORAGE_BACKEND, value: azure }
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: BUZZ_AZURE_STORAGE_ENDPOINT, value: https://examplemedia.blob.core.example.net }
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: BUZZ_S3_BUCKET }
+          any: true
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: BUZZ_S3_ACCESS_KEY }
+          any: true
+        template: templates/deployment.yaml
+      - equal:
+          path: data.BUZZ_AZURE_STORAGE_ACCOUNT_KEY
+          value: WlhoaGJYQnNaUT09
+        template: templates/secret-chart.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: BUZZ_AZURE_STORAGE_CONTAINER, value: buzz-media-example }
+        template: templates/storage-accounting-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_AZURE_STORAGE_ACCOUNT_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-buzz-relay
+                key: BUZZ_AZURE_STORAGE_ACCOUNT_KEY
+                optional: true
+        template: templates/storage-accounting-cronjob.yaml
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: BUZZ_S3_SECRET_KEY }
+          any: true
+        template: templates/storage-accounting-cronjob.yaml

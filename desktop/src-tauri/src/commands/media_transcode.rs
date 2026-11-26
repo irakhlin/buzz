@@ -790,6 +790,7 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         };
         let metadata = buzz_media_pkg::validation::validate_video_file(&output, &relay_config)
             .expect("relay rejected the canonical voice-note envelope");
