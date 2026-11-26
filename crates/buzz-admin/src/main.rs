@@ -357,11 +357,16 @@ fn storage_config_from_env() -> Result<MediaConfig> {
         .unwrap_or_else(|_| "path".to_string())
         .parse::<S3AddressingStyle>()
         .map_err(anyhow::Error::msg)?;
+    let azure = buzz_media::azure::AzureBlobConfig::from_env().map_err(anyhow::Error::msg)?;
+    let s3_bucket = match azure {
+        Some(_) => std::env::var("BUZZ_S3_BUCKET").unwrap_or_default(),
+        None => required("BUZZ_S3_BUCKET")?,
+    };
     Ok(MediaConfig {
         s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT").unwrap_or_default(),
         s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_default(),
         s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_default(),
-        s3_bucket: required("BUZZ_S3_BUCKET")?,
+        s3_bucket,
         s3_region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
         s3_addressing_style: addressing_style,
         max_image_bytes: 1,
@@ -372,6 +377,7 @@ fn storage_config_from_env() -> Result<MediaConfig> {
         upload_records_enabled: false,
         upload_ip_header: None,
         upload_port_header: None,
+        azure,
     })
 }
 

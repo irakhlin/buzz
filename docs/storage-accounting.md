@@ -1,9 +1,11 @@
 # Storage accounting
 
-`buzz-admin storage-snapshot` lists S3, calculates physical and per-community
-logical usage, and atomically replaces the completed snapshot in PostgreSQL.
-The relay reads that snapshot and exposes the existing storage gauges on its
-metrics endpoint for collection by Datadog or another metrics collector.
+`buzz-admin storage-snapshot` lists object storage (S3 or
+[Azure Blob Storage](azure-blob-storage.md)), calculates physical and
+per-community logical usage, and atomically replaces the completed snapshot in
+PostgreSQL. The relay reads that snapshot and exposes the existing storage
+gauges on its metrics endpoint for collection by Datadog or another metrics
+collector.
 
 ## Independent rollout
 
@@ -17,7 +19,7 @@ The snapshot table is part of the normal database schema, independent of worker
 installation. A missing table or inaccessible database is an error, not evidence
 that the worker is absent. Snapshot reads have a five-second budget, including
 connection acquisition, and retry on the next usage tick. They do not run on
-the relay startup path and never fall back to an S3 scan.
+the relay startup path and never fall back to an object-store scan.
 
 `BUZZ_STORAGE_METRICS` accepts:
 
@@ -51,7 +53,7 @@ through the metrics exporter's idle timeout; absence is never reported as zero
 bytes. A valid empty snapshot can report zero bytes.
 
 The reader emits fleet totals from the leader only; per-community storage is
-not a relay metric. It does not need S3 listing permission. The worker still
+not a relay metric. It does not need object-store listing permission. The worker still
 needs that permission and its database configuration.
 
 ## Usage delivery

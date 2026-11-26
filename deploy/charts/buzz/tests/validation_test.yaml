@@ -87,3 +87,50 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "S3/object-storage source missing"
+
+  - it: requires an account for the Azure storage backend
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      storage.backend: azure
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.azure.account is required when storage.backend=azure"
+
+  - it: rejects the bundled MinIO with the Azure storage backend
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      minio.enabled: true
+      storage.backend: azure
+      storage.azure.account: examplemedia
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.backend=azure cannot be combined with minio.enabled=true"
+
+  - it: rejects an Azure account key combined with Entra ID auth
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      storage.backend: azure
+      storage.azure.account: examplemedia
+      storage.azure.auth: managed_identity
+      storage.azure.accountKey: ZXhhbXBsZQ==
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.azure.accountKey is set but storage.azure.auth selects Microsoft Entra ID"
+
+  - it: requires a key source for Azure Shared Key auth
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      storage.backend: azure
+      storage.azure.account: examplemedia
+      storage.azure.auth: shared_key
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.azure.auth=shared_key needs storage.azure.accountKey"

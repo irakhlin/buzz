@@ -1,6 +1,6 @@
 # Buzz Helm Chart
 
-[Buzz](https://github.com/block/buzz) is a Nostr-based messaging platform for human–agent collaboration: a single relay binary serving WebSocket + REST + web UI, backed by PostgreSQL, Redis, and S3-compatible object storage.
+[Buzz](https://github.com/block/buzz) is a Nostr-based messaging platform for human–agent collaboration: a single relay binary serving WebSocket + REST + web UI, backed by PostgreSQL, Redis, and S3-compatible object storage or Azure Blob Storage.
 
 This chart has two operating profiles selected by values:
 
@@ -78,6 +78,7 @@ See:
 | `ownerPubkey` | 64-char lowercase hex Nostr pubkey of the relay operator | When `relay.requireRelayMembership=true` (default) |
 | `secrets.existingSecret` | Name of pre-created Secret | Production / GitOps |
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
+| `storage.azure.account` / `storage.azure.container` | Azure Blob Storage target | When `storage.backend=azure` (replaces `s3.*`) |
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
@@ -121,6 +122,42 @@ Store `BUZZ_S3_ACCESS_KEY=${{Object Storage.ACCESS_KEY_ID}}` and
 buckets, which may still require `path`. The setting changes request routing and
 SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
 `ENDPOINT` and `BUCKET` separately.
+
+## Azure Blob Storage
+
+Set `storage.backend: azure` to keep media and Git/CAS objects in one Azure
+Blob Storage container instead of S3. The relay, `operatorJobs.deletionDrain`,
+and `storageAccounting` then receive `BUZZ_AZURE_STORAGE_*` variables and no
+`BUZZ_S3_*` variables; the `s3` block is ignored. The bundled MinIO quickstart is
+S3-only, so `minio.enabled` must stay `false`.
+
+```yaml
+storage:
+  backend: azure
+  azure:
+    account: examplemedia
+    container: buzz-media
+    auth: workload_identity   # auto | shared_key | workload_identity | managed_identity
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+relay:
+  podLabels:
+    azure.workload.identity/use: "true"
+operatorJobs:
+  deletionDrain:
+    podLabels:
+      azure.workload.identity/use: "true"
+```
+
+`auth: auto` uses Shared Key when an account key is configured, then AKS
+workload identity when the pod has a federated token, then managed identity.
+For Shared Key, set `storage.azure.accountKey` (written to the chart Secret) or
+put `BUZZ_AZURE_STORAGE_ACCOUNT_KEY` in `secrets.existingSecret`. The storage
+account needs blob versioning enabled and hierarchical namespace disabled, and
+deletion jobs need permanent-delete rights when blob soft delete is on. See
+[docs/azure-blob-storage.md](../../../docs/azure-blob-storage.md) for the account
+settings and role assignments each workload needs.
 
 Object storage is contacted during relay startup only when
 `BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is

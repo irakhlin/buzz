@@ -37,7 +37,7 @@
 
 {{ else }}
 ✓ PRODUCTION PROFILE
-  External Postgres, Redis (if enabled), S3.
+  External Postgres, Redis (if enabled), {{ if eq (include "buzz.storageBackend" .) "azure" }}Azure Blob Storage{{ else }}S3{{ end }}.
   {{ if .Values.secrets.existingSecret }}- Secrets sourced from: {{ .Values.secrets.existingSecret }}{{ end }}
 {{ end }}
 
@@ -47,7 +47,11 @@
   1. BUZZ_RELAY_PRIVATE_KEY — relay identity. Rotating it = identity change;
      federation peers will treat the relay as a new identity.
   2. PostgreSQL database{{ if .Values.postgresql.enabled }} ({{ .Release.Name }}-postgresql PVC){{ end }}
+  {{- if eq (include "buzz.storageBackend" .) "azure" }}
+  3. Azure Blob container "{{ .Values.storage.azure.container }}" in account "{{ .Values.storage.azure.account }}" — media and git objects
+  {{- else }}
   3. S3 bucket "{{ .Values.s3.bucket }}" — media blobs
+  {{- end }}
   4. Git PVC ({{ include "buzz.fullname" . }}-git) — repo on-disk state
   5. Owner private key (held by the operator, NOT the chart) — restore by
      re-installing with the same ownerPubkey.

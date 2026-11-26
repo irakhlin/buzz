@@ -591,12 +591,33 @@ async fn connect_services() -> Result<Services> {
 }
 
 async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
+    let media = Arc::new(MediaStorage::new(&media_config_from_env()?)?);
+    let redis_url = required_env("REDIS_URL")?;
+    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
+    Ok(Services {
+        store,
+        media,
+        redis,
+    })
+}
+
+/// Object-store settings for the deletion executors. The `BUZZ_S3_*`
+/// bucket settings are required only when `BUZZ_STORAGE_BACKEND` selects S3.
+pub(crate) fn media_config_from_env() -> Result<buzz_media::MediaConfig> {
+    let azure = buzz_media::azure::AzureBlobConfig::from_env().map_err(anyhow::Error::msg)?;
+    let s3_setting = |name: &str| {
+        if azure.is_some() {
+            Ok(optional_env_from(|name| std::env::var(name).ok(), name))
+        } else {
+            required_env(name)
+        }
+    };
     let (s3_access_key, s3_secret_key) = s3_key_pair_from_env();
-    let media_config = buzz_media::MediaConfig {
-        s3_endpoint: required_env("BUZZ_S3_ENDPOINT")?,
+    Ok(buzz_media::MediaConfig {
+        s3_endpoint: s3_setting("BUZZ_S3_ENDPOINT")?,
         s3_access_key,
         s3_secret_key,
-        s3_bucket: required_env("BUZZ_S3_BUCKET")?,
+        s3_bucket: s3_setting("BUZZ_S3_BUCKET")?,
         s3_region: s3_region_from_env(),
         s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
             .unwrap_or_else(|_| "path".to_string())
@@ -610,14 +631,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
         upload_records_enabled: false,
         upload_ip_header: None,
         upload_port_header: None,
-    };
-    let media = Arc::new(MediaStorage::new(&media_config)?);
-    let redis_url = required_env("REDIS_URL")?;
-    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
-    Ok(Services {
-        store,
-        media,
-        redis,
+        azure,
     })
 }
 
@@ -1489,9 +1503,11 @@ async fn execute_stage(
                             .await
                             .with_context(|| {
                                 format!(
-                                    "S3 version-list preflight failed for prefix {prefix}; \
-                                     verify s3:ListBucketVersions and s3:DeleteObjectVersion \
-                                     on the relay bucket before fencing"
+                                    "object-store version-list preflight failed for prefix \
+                                     {prefix}; on S3 verify s3:ListBucketVersions and \
+                                     s3:DeleteObjectVersion on the relay bucket, on Azure \
+                                     verify the container's role assignments and soft-delete \
+                                     policy, before fencing"
                                 )
                             })?;
                     }
@@ -2075,6 +2091,7 @@ mod postgres_tests {
                     upload_records_enabled: false,
                     upload_ip_header: None,
                     upload_port_header: None,
+                    azure: None,
                 })
                 .expect("construct unused media service"),
             ),
@@ -2145,6 +2162,7 @@ mod postgres_tests {
                     upload_records_enabled: false,
                     upload_ip_header: None,
                     upload_port_header: None,
+                    azure: None,
                 })
                 .expect("construct unused media service"),
             ),
@@ -2515,6 +2533,7 @@ mod postgres_tests {
                 upload_records_enabled: false,
                 upload_ip_header: None,
                 upload_port_header: None,
+                azure: None,
             })
             .expect("construct deletion test media service"),
         )

@@ -121,6 +121,7 @@ jobs:
           cargo nextest archive \
             --cargo-profile ci \
             -p buzz-db \
+            -p buzz-media \
             -p buzz-pubsub \
             -p buzz-relay \
             -p buzz-relay-mesh \
@@ -130,6 +131,8 @@ jobs:
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
             --test e2e_channel_pins \
+            --test azurite_blob \
+            --test azurite_git_store \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -488,7 +491,9 @@ jobs:
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
-            if docker compose up -d postgres redis minio minio-init; then
+            # Azurite backs the Azure Blob Storage regressions; each test
+            # creates its own container, so azurite-init is not needed.
+            if docker compose --profile azurite up -d postgres redis minio minio-init azurite; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -517,6 +522,7 @@ jobs:
           wait_healthy "Postgres" "buzz-postgres"
           wait_healthy "Redis" "buzz-redis"
           wait_healthy "MinIO" "buzz-minio"
+          wait_healthy "Azurite" "buzz-azurite"
       - name: Download relay artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -593,6 +599,15 @@ jobs:
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/^api::media::tests::postgres_tests::external_infra_minio_tests::/)' \
+            --run-ignored ignored-only \
+            --test-threads 1
+      - name: Azure Blob Storage backend regressions
+        # Media versions/deletion and the git pointer CAS conformance probe
+        # against Azurite (http://127.0.0.1:10000/devstoreaccount1).
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E '(package(buzz-media) and binary(azurite_blob)) or (package(buzz-relay) and binary(azurite_git_store))' \
             --run-ignored ignored-only \
             --test-threads 1
       - name: Relay quota accounting and rejection regressions

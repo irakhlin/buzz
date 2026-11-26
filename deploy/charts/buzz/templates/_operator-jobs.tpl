@@ -55,10 +55,15 @@ spec:
               command: ["/usr/local/bin/buzz-admin"]
               args: ["deletions", "drain"]
               env:
+                {{- $azureStorage := eq (include "buzz.storageBackend" $root) "azure" }}
+                {{- if $azureStorage }}
+                {{- include "buzz.azureStorageEnv" $root | nindent 16 }}
+                {{- else }}
                 - { name: BUZZ_S3_ENDPOINT, value: {{ required "s3.endpoint is required when operatorJobs.deletionDrain.enabled=true" (include "buzz.s3Endpoint" $root) | quote }} }
                 - { name: BUZZ_S3_BUCKET, value: {{ required "s3.bucket is required when operatorJobs.deletionDrain.enabled=true" $root.Values.s3.bucket | quote }} }
                 - { name: BUZZ_S3_REGION, value: {{ $root.Values.s3.region | quote }} }
                 - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ $root.Values.s3.addressingStyle | quote }} }
+                {{- end }}
                 - name: DATABASE_URL
                   valueFrom:
                     secretKeyRef:
@@ -69,6 +74,7 @@ spec:
                     secretKeyRef:
                       name: {{ include "buzz.envSecretName" $root }}
                       key: REDIS_URL
+                {{- if not $azureStorage }}
                 - name: BUZZ_S3_ACCESS_KEY
                   valueFrom:
                     secretKeyRef:
@@ -81,6 +87,7 @@ spec:
                       name: {{ include "buzz.envSecretName" $root }}
                       key: BUZZ_S3_SECRET_KEY
                       optional: true
+                {{- end }}
               resources:
                 {{- toYaml $job.resources | nindent 16 }}
 {{- else -}}

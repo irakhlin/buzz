@@ -9,7 +9,7 @@ Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
-database and versioned storage bucket when testing. Owned-community workflow
+database and versioned storage bucket or container when testing. Owned-community workflow
 execution is unsupported.
 
 ## Content batches
@@ -237,9 +237,11 @@ its result may repeat that handler.
 
 ## Run against disposable test resources
 
-Build `buzz-admin`, configure `DATABASE_URL` and the `BUZZ_S3_*` variables, and
-apply the schema using the operator procedure in [database.md](database.md).
-Use a real test public key and versioned test bucket. Stop every writer before
+Build `buzz-admin`, configure `DATABASE_URL` and the `BUZZ_S3_*` variables (or
+`BUZZ_STORAGE_BACKEND=azure` and the `BUZZ_AZURE_STORAGE_*` variables from
+[azure-blob-storage.md](azure-blob-storage.md)), and apply the schema using the
+operator procedure in [database.md](database.md). Use a real test public key and
+a versioned test bucket or container. Stop every writer before
 running with `--delete`; neither the dummy gate nor a database lease prevents
 new uploads. Never point these examples at a live account for a smoke test.
 

@@ -371,6 +371,33 @@ s3:
   accessKey: ""
   secretKey: ""
 
+# ── Object storage backend ───────────────────────────────────────────────────
+# `s3` (default) uses the s3 block above. `azure` stores media and git objects
+# in an Azure Blob Storage container instead and ignores the s3 block; the
+# bundled MinIO quickstart is S3-only. See docs/azure-blob-storage.md for the
+# account requirements (blob versioning on, hierarchical namespace off) and the
+# role assignments the relay and deletion jobs need.
+storage:
+  backend: s3                    # s3 | azure
+  azure:
+    account: ""                  # storage account name
+    container: "buzz-media"
+    # Defaults to https://<account>.blob.core.windows.net. Set for sovereign
+    # clouds, private endpoints with custom DNS, or Azurite.
+    endpoint: ""
+    # auto: Shared Key when an account key is configured, else workload
+    # identity when the pod has a federated token, else managed identity.
+    auth: auto                   # auto | shared_key | workload_identity | managed_identity
+    # Shared Key. Stored in the chart Secret as BUZZ_AZURE_STORAGE_ACCOUNT_KEY;
+    # with secrets.existingSecret, put that key in your Secret instead.
+    accountKey: ""
+    # Client ID of a user-assigned managed identity (exported as
+    # AZURE_CLIENT_ID). The AKS workload identity webhook injects it itself
+    # from the service account's azure.workload.identity/client-id annotation;
+    # label pods with azure.workload.identity/use: "true" via relay.podLabels
+    # and each job's podLabels.
+    clientId: ""
+
 # Isolated S3 accounting worker. Disabled by default. The relay is ready to
 # consume snapshots whenever an operator enables a worker in this environment.
 # To push each new snapshot's per-community totals to a usage endpoint, set

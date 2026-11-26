@@ -229,6 +229,32 @@ secrets.existingSecret, use that. Otherwise use the chart-managed one.
 {{- end -}}
 {{- end -}}
 
+{{/* Object-storage backend: "s3" (default) or "azure". */}}
+{{- define "buzz.storageBackend" -}}
+{{- .Values.storage.backend | default "s3" -}}
+{{- end -}}
+
+{{/* Azure Blob Storage env shared by the relay and operator jobs. */}}
+{{- define "buzz.azureStorageEnv" -}}
+{{- $azure := .Values.storage.azure -}}
+- { name: BUZZ_STORAGE_BACKEND, value: "azure" }
+- { name: BUZZ_AZURE_STORAGE_ACCOUNT, value: {{ $azure.account | quote }} }
+- { name: BUZZ_AZURE_STORAGE_CONTAINER, value: {{ $azure.container | quote }} }
+{{- with $azure.endpoint }}
+- { name: BUZZ_AZURE_STORAGE_ENDPOINT, value: {{ . | quote }} }
+{{- end }}
+- { name: BUZZ_AZURE_STORAGE_AUTH, value: {{ $azure.auth | default "auto" | quote }} }
+{{- with $azure.clientId }}
+- { name: AZURE_CLIENT_ID, value: {{ . | quote }} }
+{{- end }}
+- name: BUZZ_AZURE_STORAGE_ACCOUNT_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "buzz.envSecretName" . }}
+      key: BUZZ_AZURE_STORAGE_ACCOUNT_KEY
+      optional: true
+{{- end -}}
+
 {{/* Effective S3 endpoint: explicit s3.endpoint wins, else bundled MinIO. */}}
 {{- define "buzz.s3Endpoint" -}}
 {{- if .Values.s3.endpoint -}}

@@ -326,3 +326,35 @@ tests:
       - equal:
           path: metadata.name
           value: very-long-release-name-for-operator-j-deletion-drain
+
+  - it: renders the drain against Azure Blob Storage without requiring S3 values
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      storage:
+        backend: azure
+        azure:
+          account: examplemedia
+          container: buzz-media
+          auth: workload_identity
+          clientId: 00000000-0000-0000-0000-000000000000
+      operatorJobs.deletionDrain:
+        enabled: true
+        podLabels:
+          azure.workload.identity/use: "true"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: BUZZ_AZURE_STORAGE_AUTH, value: workload_identity }
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: AZURE_CLIENT_ID, value: 00000000-0000-0000-0000-000000000000 }
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: BUZZ_S3_ENDPOINT }
+          any: true
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["azure.workload.identity/use"]
+          value: "true"

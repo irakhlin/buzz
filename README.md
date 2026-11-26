@@ -210,7 +210,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 └───┬──────────────────────────┬──────────────────────────┬───────────────┘
     │                          │                          │
  ┌──▼───────────┐       ┌──────▼──────┐           ┌───────▼─────┐
- │   Postgres   │       │    Redis    │           │   S3/MinIO  │
+ │   Postgres   │       │    Redis    │           │ S3 · Azure  │
  │ (events +    │       │  (pub/sub)  │           │  (Blossom)  │
  │  FTS search) │       └─────────────┘           └─────────────┘
  └──────────────┘
@@ -229,7 +229,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. The human
 
 **Git & pairing** — `git-sign-nostr` / `git-credential-nostr` (nostr-signed git) · `buzz-pair-relay` / `buzz-pairing-cli` (relay pairing)
 
-**Shared** — `buzz-sdk` (typed event builders) · `buzz-media` (Blossom/S3)
+**Shared** — `buzz-sdk` (typed event builders) · `buzz-media` (Blossom over S3 or Azure Blob Storage)
 
 **Tooling** — `buzz-admin` (admin CLI) · `buzz-test-client` (E2E)
 

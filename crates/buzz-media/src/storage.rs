@@ -1,4 +1,5 @@
-//! S3/MinIO storage client.
+//! Object storage client for media: S3-compatible (S3/MinIO) or Azure Blob
+//! Storage, selected by [`MediaConfig::azure`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +15,9 @@ use s3::request::Request as _;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 
+mod azure_backend;
 mod versions_xml;
+use azure_backend::AzureMedia;
 use versions_xml::parse_object_versions_page;
 
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
@@ -65,15 +68,24 @@ pub struct ObjectVersionsPage {
     pub is_truncated: bool,
 }
 
-/// S3-compatible object storage client.
+/// Media object storage client (S3-compatible or Azure Blob Storage).
 pub struct MediaStorage {
-    bucket: Box<Bucket>,
+    backend: Backend,
+}
+
+enum Backend {
+    S3(Box<Bucket>),
+    Azure(Box<AzureMedia>),
 }
 
 impl MediaStorage {
     /// Create a new storage client from config.
     ///
-    /// Credential selection:
+    /// When [`MediaConfig::azure`] is set the client targets that Azure Blob
+    /// container (see [`crate::azure`] for authorization). Otherwise it
+    /// targets the S3 bucket.
+    ///
+    /// S3 credential selection:
     /// - If both `s3_access_key` and `s3_secret_key` are non-empty, use them as
     ///   static credentials (MinIO/local/dev, or any static-key deployment).
     /// - Otherwise, fall back to the AWS default credential chain via
@@ -82,6 +94,12 @@ impl MediaStorage {
     ///   instance-metadata providers, in that order. This lets the relay use
     ///   the pod's IAM role without long-lived static keys.
     pub fn new(config: &MediaConfig) -> Result<Self, MediaError> {
+        if let Some(azure) = &config.azure {
+            let client = crate::azure::AzureBlobClient::new(azure)?;
+            return Ok(Self {
+                backend: Backend::Azure(Box::new(AzureMedia::new(client))),
+            });
+        }
         let region = Region::Custom {
             region: config.s3_region.clone(),
             endpoint: config.s3_endpoint.clone(),
@@ -116,7 +134,16 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        Ok(Self {
+            backend: Backend::S3(bucket),
+        })
+    }
+
+    fn s3(&self) -> Result<&Bucket, &AzureMedia> {
+        match &self.backend {
+            Backend::S3(bucket) => Ok(bucket),
+            Backend::Azure(azure) => Err(azure),
+        }
     }
 
     /// Store an object from a byte slice.
@@ -124,15 +151,19 @@ impl MediaStorage {
     /// Used for images, sidecars, and thumbnails. For large video files use
     /// [`put_file`] to avoid loading the entire blob into RAM.
     pub async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
-        self.bucket
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.put(key, bytes, content_type).await,
+        };
+        bucket
             .put_object_with_content_type(key, bytes, content_type)
             .await?;
         Ok(())
     }
 
-    /// Stream a file from disk into S3 without loading it into RAM.
+    /// Stream a file from disk into storage without loading it into RAM.
     ///
-    /// Uses rust-s3's `put_object_stream_with_content_type` which reads from
+    /// Azure stages 8 MiB blocks. S3 uses rust-s3's `put_object_stream_with_content_type` which reads from
     /// the file incrementally via an 8 MiB `BufReader`. The full file is never
     /// held in memory simultaneously. Intended for video blobs (up to 500 MB).
     pub async fn put_file(
@@ -143,12 +174,16 @@ impl MediaStorage {
     ) -> Result<(), MediaError> {
         const BUF: usize = 8 * 1024 * 1024; // 8 MiB read buffer
 
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.put_file(key, path, content_type).await,
+        };
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|e| MediaError::Io(e.to_string()))?;
         let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
 
-        self.bucket
+        bucket
             .put_object_stream_with_content_type(&mut reader, key, content_type)
             .await?;
         Ok(())
@@ -156,7 +191,11 @@ impl MediaStorage {
 
     /// Retrieve an object's bytes.
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError> {
-        match self.bucket.get_object(key).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.get(key, None).await,
+        };
+        match bucket.get_object(key).await {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
             Err(e) => Err(MediaError::StorageError(e.to_string())),
@@ -169,7 +208,11 @@ impl MediaStorage {
     /// is transferred from S3 — the full object is never loaded into RAM.
     /// Intended for HTTP 206 range responses on large video blobs.
     pub async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError> {
-        match self.bucket.get_object_range(key, start, Some(end)).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.get(key, Some((start, end))).await,
+        };
+        match bucket.get_object_range(key, start, Some(end)).await {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
             Err(e) => Err(MediaError::StorageError(e.to_string())),
@@ -182,8 +225,11 @@ impl MediaStorage {
     /// The full object is never buffered — intended for streaming large
     /// blobs (video) directly into HTTP responses via `Body::from_stream()`.
     pub async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError> {
-        let response = self
-            .bucket
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.get_stream(key).await,
+        };
+        let response = bucket
             .get_object_stream(key)
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
@@ -200,7 +246,11 @@ impl MediaStorage {
 
     /// Check if an object exists. Returns false on 404.
     pub async fn head(&self, key: &str) -> Result<bool, MediaError> {
-        match self.bucket.head_object(key).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return Ok(azure.head(key).await?.is_some()),
+        };
+        match bucket.head_object(key).await {
             Ok(_) => Ok(true),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(false),
             Err(e) => Err(MediaError::StorageError(e.to_string())),
@@ -209,7 +259,11 @@ impl MediaStorage {
 
     /// Delete an object. Returns an error on failure — callers decide whether to propagate.
     pub async fn delete(&self, key: &str) -> Result<(), MediaError> {
-        self.bucket
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.delete(key).await,
+        };
+        bucket
             .delete_object(key)
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
@@ -218,7 +272,11 @@ impl MediaStorage {
 
     /// HEAD with metadata — returns Content-Length (size).
     pub async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError> {
-        match self.bucket.head_object(key).await {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.head(key).await,
+        };
+        match bucket.head_object(key).await {
             Ok((result, _)) => Ok(Some(BlobHeadMeta {
                 size: result.content_length.unwrap_or(0) as u64,
             })),
@@ -234,9 +292,14 @@ impl MediaStorage {
     /// Historical MinIO releases report already-absent keys as
     /// `NoSuchKey`/`NoSuchVersion` errors instead of deleted; both map to
     /// `already_missing` to keep checkpointed retry idempotent.
+    ///
+    /// Azure deletes each blob individually with the same per-key folding.
     pub async fn delete_objects(&self, keys: &[String]) -> Result<BulkDeleteOutcome, MediaError> {
         if keys.is_empty() {
             return Ok(BulkDeleteOutcome::default());
+        }
+        if let Err(azure) = self.s3() {
+            return Ok(azure.delete_objects(keys).await);
         }
         let identifiers = keys
             .iter()
@@ -253,7 +316,13 @@ impl MediaStorage {
     /// prove permission when policies can be prefix- or tag-constrained.
     /// Operators must still provision `s3:DeleteObjectVersion`; the first exact
     /// version deletion remains the destructive proof.
+    ///
+    /// Azure additionally reads the account's blob soft-delete policy and
+    /// fails closed when deletes could not be made permanent.
     pub async fn preflight_version_listing(&self, prefix: &str) -> Result<(), MediaError> {
+        if let Err(azure) = self.s3() {
+            return azure.preflight_deletion(prefix).await;
+        }
         self.list_prefix_versions_page(prefix, None, None, 1)
             .await
             .map(|_| ())
@@ -263,11 +332,15 @@ impl MediaStorage {
     ///
     /// Every identifier includes a version id, so this removes historical
     /// versions and delete markers permanently instead of adding another
-    /// delete marker to a versioned bucket.
+    /// delete marker to a versioned bucket. On Azure, current versions are
+    /// demoted and soft-deleted versions purged so removal is permanent.
     pub async fn delete_object_versions(
         &self,
         versions: &[ObjectVersionRef],
     ) -> Result<BulkDeleteOutcome, MediaError> {
+        if let Err(azure) = self.s3() {
+            return Ok(azure.delete_object_versions(versions).await);
+        }
         self.delete_object_versions_with_folding(versions, fold_version_delete_result)
             .await
     }
@@ -281,8 +354,10 @@ impl MediaStorage {
             return Ok(BulkDeleteOutcome::default());
         }
         let identifiers = object_version_identifiers(versions);
-        let result = self
-            .bucket
+        let bucket = self.s3().map_err(|_| {
+            MediaError::StorageError("S3 bulk delete called on an Azure backend".to_owned())
+        })?;
+        let result = bucket
             .delete_objects(identifiers)
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
@@ -293,8 +368,10 @@ impl MediaStorage {
         &self,
         identifiers: Vec<s3::serde_types::ObjectIdentifier>,
     ) -> Result<BulkDeleteOutcome, MediaError> {
-        let result = self
-            .bucket
+        let bucket = self.s3().map_err(|_| {
+            MediaError::StorageError("S3 bulk delete called on an Azure backend".to_owned())
+        })?;
+        let result = bucket
             .delete_objects(identifiers)
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
@@ -323,12 +400,8 @@ impl MediaStorage {
         sha256: &str,
     ) -> Result<BlobMeta, MediaError> {
         let key = Self::ctx_sidecar_key(ctx, sha256);
-        let resp = match self.bucket.get_object(&key).await {
-            Ok(response) => response,
-            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => return Err(MediaError::NotFound),
-            Err(error) => return Err(error.into()),
-        };
-        let meta: BlobMeta = serde_json::from_slice(&resp.to_vec())?;
+        let bytes = self.get(&key).await?;
+        let meta: BlobMeta = serde_json::from_slice(&bytes)?;
         Ok(meta)
     }
 
@@ -397,8 +470,11 @@ impl MediaStorage {
         continuation_token: Option<String>,
         max_keys: usize,
     ) -> Result<crate::bucket_index::Page, MediaError> {
-        let (result, _status) = self
-            .bucket
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.list_page(prefix, continuation_token, max_keys).await,
+        };
+        let (result, _status) = bucket
             .list_page(
                 prefix.to_string(),
                 None,
@@ -426,6 +502,9 @@ impl MediaStorage {
     /// must enumerate both. Pagination must carry both `KeyMarker` and
     /// `VersionIdMarker`; carrying only the key marker can skip siblings when a
     /// key has multiple versions on a page boundary.
+    ///
+    /// Azure lists with `include=versions`; its single opaque marker travels
+    /// in the version-id marker slot (see `azure_backend`).
     pub async fn list_prefix_versions_page(
         &self,
         prefix: &str,
@@ -433,6 +512,14 @@ impl MediaStorage {
         version_id_marker: Option<String>,
         max_keys: usize,
     ) -> Result<ObjectVersionsPage, MediaError> {
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => {
+                return azure
+                    .list_versions_page(prefix, key_marker, version_id_marker, max_keys)
+                    .await
+            }
+        };
         let mut query = HashMap::from([
             ("versions".to_string(), String::new()),
             ("prefix".to_string(), prefix.to_string()),
@@ -444,8 +531,7 @@ impl MediaStorage {
         if let Some(marker) = version_id_marker {
             query.insert("version-id-marker".to_string(), marker);
         }
-        let bucket = self
-            .bucket
+        let bucket = bucket
             .with_extra_query(query)
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
         let request = s3::request::tokio_backend::ReqwestRequest::new(
@@ -692,6 +778,14 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
+        }
+    }
+
+    fn s3_bucket(storage: &MediaStorage) -> &Bucket {
+        match storage.s3() {
+            Ok(bucket) => bucket,
+            Err(_) => panic!("expected an S3 backend"),
         }
     }
 
@@ -702,8 +796,8 @@ mod tests {
     fn static_keys_build_client_with_configured_region() {
         let storage = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
             .expect("static creds should build a client");
-        match storage.bucket.region {
-            Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
+        match &s3_bucket(&storage).region {
+            Region::Custom { region, .. } => assert_eq!(region, "us-west-2"),
             other => panic!("expected Custom region, got {other:?}"),
         }
     }
@@ -712,15 +806,15 @@ mod tests {
     fn client_constructor_applies_both_addressing_styles() {
         let path = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
             .expect("path-style client");
-        assert!(path.bucket.is_path_style());
-        assert_eq!(path.bucket.url(), "http://localhost:9000/buzz-media");
+        assert!(s3_bucket(&path).is_path_style());
+        assert_eq!(s3_bucket(&path).url(), "http://localhost:9000/buzz-media");
 
         let mut virtual_config = storage_config("buzz_dev", "buzz_dev_secret");
         virtual_config.s3_addressing_style = S3AddressingStyle::Virtual;
         let virtual_hosted = MediaStorage::new(&virtual_config).expect("virtual-hosted client");
-        assert!(virtual_hosted.bucket.is_subdomain_style());
+        assert!(s3_bucket(&virtual_hosted).is_subdomain_style());
         assert_eq!(
-            virtual_hosted.bucket.url(),
+            s3_bucket(&virtual_hosted).url(),
             "http://buzz-media.localhost:9000"
         );
     }
@@ -850,8 +944,11 @@ impl MediaStorage {
         version_id: &str,
         max_bytes: usize,
     ) -> Result<Vec<u8>, MediaError> {
-        let bucket = self
-            .bucket
+        let bucket = match self.s3() {
+            Ok(bucket) => bucket,
+            Err(azure) => return azure.get_small_version(key, version_id, max_bytes).await,
+        };
+        let bucket = bucket
             .with_extra_query(HashMap::from([(
                 "versionId".to_owned(),
                 version_id.to_owned(),

@@ -72,6 +72,15 @@ The S3 principal needs the relay's normal object permissions plus bucket-level
 tenant-owned prefix. This also applies to never-versioned buckets because S3
 reports their objects with the `null` version id.
 
+With `storage.backend: azure`, the pod receives the `BUZZ_STORAGE_BACKEND` and
+`BUZZ_AZURE_STORAGE_*` settings instead of the S3 ones, and the Secret may
+contain `BUZZ_AZURE_STORAGE_ACCOUNT_KEY` for Shared Key. With Microsoft Entra
+ID, the executor's identity needs Storage Blob Data Owner (or a custom role
+with `deleteBlobVersion/action` and `permanentDelete/action`) on the container
+and read access to the account's blob service properties. Deletion fails
+closed when blob soft delete is on without permanent delete. See
+[Azure Blob Storage](azure-blob-storage.md#role-assignments).
+
 ## Runbook
 
 1. Confirm database migrations are current. For operator-origin requests,
@@ -79,8 +88,8 @@ reports their objects with the `null` version id.
    `buzz-admin deletions inspect <request-id>`. For owner-origin requests,
    expect the drain to record `approval_origin: owner_automatic`; `approved_by`
    is the immutable mediating operator, not the owner.
-2. Confirm the selected Secret contains the required keys and the S3 principal
-   has version-list and exact-version delete permissions.
+2. Confirm the selected Secret contains the required keys and the object-store
+   principal has version-list and exact-version delete permissions.
 3. Enable the CronJob and inspect its rendered command and environment before
    rollout.
 4. Locate the rendered CronJob by label rather than by guessing its name:

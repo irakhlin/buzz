@@ -217,6 +217,32 @@
         "secretKey": { "type": "string" }
       }
     },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["s3", "azure"],
+          "description": "Object store for media and git objects. azure uses storage.azure and ignores the s3 block."
+        },
+        "azure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "account": { "type": "string", "pattern": "^([a-z0-9]{3,24})?$" },
+            "container": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$" },
+            "endpoint": { "type": "string", "pattern": "^(https?://.+)?$" },
+            "auth": {
+              "type": "string",
+              "enum": ["auto", "shared_key", "workload_identity", "managed_identity"]
+            },
+            "accountKey": { "type": "string" },
+            "clientId": { "type": "string" }
+          }
+        }
+      }
+    },
     "acceptance": {
       "type": "object",
       "additionalProperties": false,

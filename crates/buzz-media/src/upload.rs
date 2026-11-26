@@ -602,6 +602,7 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         }
     }
 
@@ -882,6 +883,7 @@ mod minio_tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+            azure: None,
         }
     }
 

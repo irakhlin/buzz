@@ -355,26 +355,7 @@ async fn scan_storage(
 }
 
 pub(super) fn configured_storage() -> Result<MediaStorage> {
-    let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
-    Ok(MediaStorage::new(&buzz_media::MediaConfig {
-        s3_endpoint: crate::required_env("BUZZ_S3_ENDPOINT")?,
-        s3_bucket: crate::required_env("BUZZ_S3_BUCKET")?,
-        s3_access_key,
-        s3_secret_key,
-        s3_region: crate::s3_region_from_env(),
-        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
-            .unwrap_or_else(|_| "path".into())
-            .parse()
-            .map_err(anyhow::Error::msg)?,
-        max_image_bytes: 1,
-        max_gif_bytes: 1,
-        max_video_bytes: 1,
-        max_file_bytes: 1,
-        public_base_url: "https://example.org/media".into(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
-    })?)
+    Ok(MediaStorage::new(&crate::media_config_from_env()?)?)
 }
 
 #[cfg(test)]
